@@ -1,0 +1,887 @@
+#!/usr/bin/env python3
+"""HacknetOS Settings — full system, desktop, theme, input, and keybind settings."""
+
+import json
+import os
+import platform
+import shutil
+import subprocess
+import gi
+
+if os.environ.get("WLR_RENDERER") == "pixman" and "GSK_RENDERER" not in os.environ:
+    os.environ["GSK_RENDERER"] = "cairo"
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gdk, Gtk  # noqa: E402
+
+CONFIG_DIR = os.path.expanduser("~/.config/hacknet")
+KEYBINDS_JSON = os.path.join(CONFIG_DIR, "keybinds.json")
+SWAY_BINDS = os.path.expanduser("~/.config/sway/hacknet-user-binds.conf")
+SWAY_INPUT = os.path.expanduser("~/.config/sway/hacknet-user-input.conf")
+HYPR_BINDS = os.path.expanduser("~/.config/hypr/hacknet-user-binds.lua")
+HYPR_INPUT = os.path.expanduser("~/.config/hypr/hacknet-user-input.lua")
+INPUT_JSON = os.path.join(CONFIG_DIR, "input.json")
+
+CSS = b"""
+window {
+    background-color: #0b0e14;
+    color: #c0c8d0;
+    font-family: "JetBrainsMono Nerd Font", "Noto Sans", sans-serif;
+}
+.sidebar {
+    background-color: #0d111a;
+    border-right: 1px solid #232b3e;
+}
+.sidebar list row {
+    padding: 10px 14px;
+    border-radius: 0px;
+}
+.sidebar list row:selected {
+    background-color: #1c2436;
+    color: #7aa2f7;
+    border-left: 3px solid #7aa2f7;
+}
+.header-bar {
+    background-color: #101520;
+    border-bottom: 1px solid #232b3e;
+    padding: 12px 20px;
+}
+.title-label {
+    font-size: 18px;
+    font-weight: bold;
+    color: #b9a6ff;
+}
+.section-title {
+    font-size: 14px;
+    font-weight: bold;
+    color: #7aa2f7;
+}
+.card {
+    background-color: #121722;
+    border: 1px solid #232b3e;
+    border-radius: 6px;
+    padding: 14px;
+}
+.muted {
+    color: #79808f;
+    font-size: 12px;
+}
+.status-ok {
+    color: #9ece6a;
+    font-size: 12px;
+}
+.status-warn {
+    color: #e0af68;
+    font-size: 12px;
+}
+button.primary {
+    background-color: #5a4fcf;
+    color: #ffffff;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 14px;
+    font-weight: bold;
+}
+button.primary:hover {
+    background-color: #6c61e0;
+}
+button.secondary {
+    background-color: #1c2436;
+    color: #c0c8d0;
+    border: 1px solid #2b3b52;
+    border-radius: 4px;
+    padding: 6px 12px;
+}
+button.secondary:hover {
+    background-color: #253047;
+}
+button.danger {
+    background-color: #3a1922;
+    color: #f7768e;
+    border: 1px solid #6b2938;
+    border-radius: 4px;
+    padding: 6px 12px;
+}
+"""
+
+THEMES = [
+    ("blue", "Hacknet Blue (Default)"),
+    ("ente", "Ente (Cyan / Teal)"),
+    ("hellhound", "Hellhound (Crimson / Amber)"),
+    ("naix", "Naix (Matrix Emerald)"),
+    ("hacknet", "Hacknet Classic"),
+]
+
+KEYBIND_PRESET_ACTIONS = [
+    ("Toggle RAM Gutter", "hacknetctl toggle-gutter"),
+    ("Toggle Console (Full / Bottom)", "hacknetctl toggle-terminal-bottom"),
+    ("Apply Theme: Blue", "hacknet-theme apply blue"),
+    ("Apply Theme: Ente", "hacknet-theme apply ente"),
+    ("Apply Theme: Hellhound", "hacknet-theme apply hellhound"),
+    ("Apply Theme: Naix", "hacknet-theme apply naix"),
+    ("Apply Theme: Hacknet", "hacknet-theme apply hacknet"),
+    ("New Virtual Desktop", "hacknetctl desktop-add"),
+    ("Next Virtual Desktop", "hacknetctl desktop-switch-next"),
+    ("Previous Virtual Desktop", "hacknetctl desktop-switch-prev"),
+    ("Toggle Fullscreen", "hacknetctl fullscreen-toggle"),
+    ("Open App Launcher", "hacknet-launcher"),
+    ("Open HacknetOS Settings", "hacknet-settings"),
+    ("Open File Manager", "thunar"),
+    ("Open Dock Terminal", "hacknet-dock-term"),
+    ("Lock Screen", "sh -c 'mkdir -p ~/.local/state/hacknet && touch ~/.local/state/hacknet/locked'"),
+    ("Custom Command...", "__custom__"),
+]
+
+KEYMAP_LAYOUTS = ["us", "gb", "de", "fr", "es", "it", "pt", "br", "jp", "se", "no", "dk"]
+
+
+def run_cmd(cmd, check=False, timeout=3):
+    try:
+        res = subprocess.run(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=check,
+            timeout=timeout,
+        )
+        return res.returncode, res.stdout.strip(), res.stderr.strip()
+    except Exception as exc:
+        return 1, "", str(exc)
+
+
+def run_detached(cmd):
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def compositor_backend():
+    if os.environ.get("SWAYSOCK") or shutil.which("swaymsg") and run_cmd(["swaymsg", "-t", "get_version"])[0] == 0:
+        return "sway"
+    if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") or shutil.which("hyprctl") and run_cmd(["hyprctl", "version"])[0] == 0:
+        return "hyprland"
+    return "unknown"
+
+
+def reload_compositor():
+    b = compositor_backend()
+    if b == "sway":
+        run_cmd(["swaymsg", "reload"])
+    elif b == "hyprland":
+        run_cmd(["hyprctl", "reload"])
+
+
+def make_card(title=None):
+    card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+    card.add_css_class("card")
+    if title:
+        lbl = Gtk.Label(label=title, xalign=0)
+        lbl.add_css_class("section-title")
+        card.append(lbl)
+    return card
+
+
+def scrolled_page():
+    scroll = Gtk.ScrolledWindow()
+    scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+    scroll.set_vexpand(True)
+    scroll.set_hexpand(True)
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+    box.set_margin_top(18)
+    box.set_margin_bottom(24)
+    box.set_margin_start(22)
+    box.set_margin_end(22)
+    scroll.set_child(box)
+    return scroll, box
+
+
+class SettingsWindow(Gtk.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="HacknetOS Settings")
+        self.set_default_size(980, 680)
+
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.set_child(root)
+
+        # Header
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        header.add_css_class("header-bar")
+        title = Gtk.Label(label="HACKNETOS // SYSTEM SETTINGS", xalign=0)
+        title.add_css_class("title-label")
+        header.append(title)
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        header.append(spacer)
+        self.status_lbl = Gtk.Label(label="", xalign=1)
+        self.status_lbl.add_css_class("muted")
+        header.append(self.status_lbl)
+        root.append(header)
+
+        # Split body: sidebar + stack
+        body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        body.set_vexpand(True)
+        root.append(body)
+
+        sidebar_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        sidebar_box.add_css_class("sidebar")
+        sidebar_box.set_size_request(220, -1)
+        self.nav_list = Gtk.ListBox()
+        self.nav_list.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        sidebar_box.append(self.nav_list)
+        body.append(sidebar_box)
+
+        self.stack = Gtk.Stack()
+        self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.stack.set_hexpand(True)
+        self.stack.set_vexpand(True)
+        body.append(self.stack)
+
+        self._pages = []
+        self._page_builders = {}
+        self._add_page("appearance", "Appearance & Theme", self._build_appearance_page)
+        self._add_page("desktop", "Desktop & Layout", self._build_desktop_page)
+        self._add_page("keybinds", "Keybinds", self._build_keybinds_page)
+        self._add_page("display", "Display & Monitors", self._build_display_page)
+        self._add_page("audio", "Audio & Devices", self._build_audio_page)
+        self._add_page("network", "Network & Bluetooth", self._build_network_page)
+        self._add_page("input", "Keyboard & Mouse", self._build_input_page)
+        self._add_page("notifications", "Notifications", self._build_notifications_page)
+        self._add_page("system", "Date, Time & System", self._build_system_page)
+
+        self.nav_list.connect("row-selected", self._on_nav_selected)
+        self.nav_list.select_row(self.nav_list.get_row_at_index(0))
+
+    def _set_status(self, msg: str, ok: bool = True):
+        self.status_lbl.set_text(msg)
+        self.status_lbl.remove_css_class("status-ok")
+        self.status_lbl.remove_css_class("status-warn")
+        self.status_lbl.add_css_class("status-ok" if ok else "status-warn")
+
+    def _add_page(self, name: str, label: str, builder_fn):
+        holder = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        holder.set_hexpand(True)
+        holder.set_vexpand(True)
+        self.stack.add_named(holder, name)
+        self._page_builders[name] = (holder, builder_fn)
+        row = Gtk.ListBoxRow()
+        row.page_name = name
+        row.set_child(Gtk.Label(label=label, xalign=0))
+        self.nav_list.append(row)
+        self._pages.append(name)
+
+    def _on_nav_selected(self, _, row):
+        if row is not None:
+            if row.page_name in self._page_builders:
+                holder, builder_fn = self._page_builders.pop(row.page_name)
+                holder.append(builder_fn())
+            self.stack.set_visible_child_name(row.page_name)
+
+    # ------------------------------------------------------------ Appearance
+    def _build_appearance_page(self):
+        scroll, box = scrolled_page()
+        card = make_card("HacknetOS Color Theme")
+        desc = Gtk.Label(
+            label="Select a preset to update Quickshell, terminal, and desktop accent colors.",
+            xalign=0, wrap=True,
+        )
+        desc.add_css_class("muted")
+        card.append(desc)
+
+        flow = Gtk.FlowBox()
+        flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        flow.set_row_spacing(8)
+        flow.set_column_spacing(8)
+        for tid, tname in THEMES:
+            btn = Gtk.Button(label=tname)
+            btn.add_css_class("secondary")
+            btn.connect("clicked", lambda _, t=tid, n=tname: self._apply_theme(t, n))
+            flow.append(btn)
+        card.append(flow)
+
+        cfg_path = "/etc/hacknetos/theme.cfg"
+        cfg_val = "blue"
+        if os.path.isfile(cfg_path):
+            try:
+                cfg_val = open(cfg_path).read().strip() or "blue"
+            except OSError:
+                pass
+        cfg_lbl = Gtk.Label(label=f"System default (/etc/hacknetos/theme.cfg): {cfg_val}", xalign=0)
+        cfg_lbl.add_css_class("muted")
+        card.append(cfg_lbl)
+        box.append(card)
+        return scroll
+
+    def _apply_theme(self, theme_id: str, label: str):
+        rc, _, err = run_cmd(["hacknet-theme", "apply", theme_id])
+        if rc == 0:
+            self._set_status(f"Applied theme: {label}", True)
+        else:
+            self._set_status(f"Theme error: {err}", False)
+
+    # ------------------------------------------------------------ Desktop & Layout
+    def _build_desktop_page(self):
+        scroll, box = scrolled_page()
+
+        card1 = make_card("Workspace & Panel Layout")
+        row1 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        for label, args in [
+            ("Toggle RAM Gutter", ["hacknetctl", "toggle-gutter"]),
+            ("Toggle Console (Full / Bottom)", ["hacknetctl", "toggle-terminal-bottom"]),
+            ("Toggle Fullscreen", ["hacknetctl", "fullscreen-toggle"]),
+        ]:
+            b = Gtk.Button(label=label)
+            b.add_css_class("secondary")
+            b.connect("clicked", lambda _, c=args, l=label: self._run_ctl(c, l))
+            row1.append(b)
+        card1.append(row1)
+        box.append(card1)
+
+        card2 = make_card("Virtual Desktops")
+        row2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        add_btn = Gtk.Button(label="+ New Desktop")
+        add_btn.add_css_class("primary")
+        add_btn.connect("clicked", lambda *_: self._run_ctl(["hacknetctl", "desktop-add"], "Added virtual desktop"))
+        row2.append(add_btn)
+
+        prev_btn = Gtk.Button(label="← Previous")
+        prev_btn.add_css_class("secondary")
+        prev_btn.connect("clicked", lambda *_: self._run_ctl(["hacknetctl", "desktop-switch-prev"], "Previous desktop"))
+        row2.append(prev_btn)
+
+        next_btn = Gtk.Button(label="Next →")
+        next_btn.add_css_class("secondary")
+        next_btn.connect("clicked", lambda *_: self._run_ctl(["hacknetctl", "desktop-switch-next"], "Next desktop"))
+        row2.append(next_btn)
+        card2.append(row2)
+
+        switch_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        for i in range(1, 6):
+            db = Gtk.Button(label=f"Desktop {i}")
+            db.add_css_class("secondary")
+            db.connect("clicked", lambda _, idx=i: self._run_ctl(["hacknetctl", "desktop-switch", str(idx)], f"Switched to Desktop {idx}"))
+            switch_row.append(db)
+        card2.append(switch_row)
+        box.append(card2)
+        return scroll
+
+    def _run_ctl(self, cmd, msg):
+        rc, _, err = run_cmd(cmd)
+        self._set_status(msg if rc == 0 else f"Failed: {err}", rc == 0)
+
+    # ------------------------------------------------------------ Keybinds
+    def _load_keybinds(self):
+        if os.path.isfile(KEYBINDS_JSON):
+            try:
+                data = json.load(open(KEYBINDS_JSON))
+                if isinstance(data, list):
+                    return data
+            except Exception:
+                pass
+        return []
+
+    def _save_and_apply_keybinds(self, binds):
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(KEYBINDS_JSON, "w") as f:
+            json.dump(binds, f, indent=2)
+
+        os.makedirs(os.path.dirname(SWAY_BINDS), exist_ok=True)
+        with open(SWAY_BINDS, "w") as f:
+            f.write("# Managed by hacknet-settings\n")
+            for b in binds:
+                mods = [m.lower() for m in b.get("mods", [])]
+                sway_mods = [("$mod" if m == "super" else "Mod1" if m == "alt" else "Control" if m == "ctrl" else "Shift") for m in mods]
+                combo = "+".join(sway_mods + [b["key"]])
+                f.write(f"bindsym {combo} exec {b['command']}\n")
+
+        os.makedirs(os.path.dirname(HYPR_BINDS), exist_ok=True)
+        with open(HYPR_BINDS, "w") as f:
+            f.write("-- Managed by hacknet-settings\nlocal hl = require('hyprland')\n")
+            for b in binds:
+                mods = [m.upper() for m in b.get("mods", [])]
+                combo = " + ".join(mods + [b["key"]])
+                cmd_esc = b["command"].replace("\\", "\\\\").replace('"', '\\"')
+                f.write(f'hl.bind("{combo}", hl.dsp.exec_cmd("{cmd_esc}"))\n')
+
+        reload_compositor()
+        self._set_status("Saved keybinds & reloaded compositor", True)
+
+    def _build_keybinds_page(self):
+        scroll, box = scrolled_page()
+        self._binds = self._load_keybinds()
+
+        add_card = make_card("Add / Update Desktop Keybind")
+        mod_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        mod_row.append(Gtk.Label(label="Modifiers:", xalign=0))
+        self.kb_super = Gtk.CheckButton(label="Super", active=True)
+        self.kb_shift = Gtk.CheckButton(label="Shift")
+        self.kb_ctrl = Gtk.CheckButton(label="Ctrl")
+        self.kb_alt = Gtk.CheckButton(label="Alt")
+        for w in (self.kb_super, self.kb_shift, self.kb_ctrl, self.kb_alt):
+            mod_row.append(w)
+        add_card.append(mod_row)
+
+        key_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        key_row.append(Gtk.Label(label="Key (e.g. v, t, f12, Return):", xalign=0))
+        self.kb_key = Gtk.Entry(placeholder_text="v")
+        self.kb_key.set_width_chars(12)
+        key_row.append(self.kb_key)
+        add_card.append(key_row)
+
+        act_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        act_row.append(Gtk.Label(label="Action:", xalign=0))
+        self.kb_action = Gtk.DropDown.new_from_strings([a[0] for a in KEYBIND_PRESET_ACTIONS])
+        self.kb_action.set_hexpand(True)
+        self.kb_action.connect("notify::selected", self._on_kb_action_changed)
+        act_row.append(self.kb_action)
+        add_card.append(act_row)
+
+        self.kb_custom = Gtk.Entry(placeholder_text="Custom command (e.g. hacknet-theme apply naix)")
+        self.kb_custom.set_visible(False)
+        add_card.append(self.kb_custom)
+
+        save_btn = Gtk.Button(label="Add Keybind & Apply")
+        save_btn.add_css_class("primary")
+        save_btn.connect("clicked", self._on_add_keybind)
+        add_card.append(save_btn)
+        box.append(add_card)
+
+        list_card = make_card("Custom User Keybinds")
+        self.kb_list_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        list_card.append(self.kb_list_box)
+        box.append(list_card)
+
+        defaults_card = make_card("Built-in HacknetOS Shortcuts")
+        defaults_lbl = Gtk.Label(
+            label=(
+                "Super (tap): App Search Bar  |  Super+Enter: New Terminal  |  Super+Shift+Enter: Stage Terminal\n"
+                "Super+Tab: Cycle Stage  |  Super+F: Fullscreen  |  Super+Q/W: Close Window\n"
+                "Super+1..5 / Left / Right: Switch Desktop  |  Super+Shift+N: New Desktop  |  Super+L: Lock"
+            ),
+            xalign=0, wrap=True,
+        )
+        defaults_lbl.add_css_class("muted")
+        defaults_card.append(defaults_lbl)
+        box.append(defaults_card)
+
+        self._refresh_kb_list()
+        return scroll
+
+    def _on_kb_action_changed(self, *_):
+        idx = self.kb_action.get_selected()
+        self.kb_custom.set_visible(KEYBIND_PRESET_ACTIONS[idx][1] == "__custom__")
+
+    def _on_add_keybind(self, *_):
+        key = self.kb_key.get_text().strip()
+        if not key:
+            self._set_status("Enter a key name first", False)
+            return
+        mods = []
+        if self.kb_super.get_active():
+            mods.append("Super")
+        if self.kb_ctrl.get_active():
+            mods.append("Ctrl")
+        if self.kb_alt.get_active():
+            mods.append("Alt")
+        if self.kb_shift.get_active():
+            mods.append("Shift")
+
+        idx = self.kb_action.get_selected()
+        label, cmd = KEYBIND_PRESET_ACTIONS[idx]
+        if cmd == "__custom__":
+            cmd = self.kb_custom.get_text().strip()
+            label = cmd
+        if not cmd:
+            self._set_status("Enter a custom command", False)
+            return
+
+        self._binds = [b for b in self._binds if not (b.get("mods") == mods and b.get("key") == key)]
+        self._binds.append({"mods": mods, "key": key, "label": label, "command": cmd})
+        self._save_and_apply_keybinds(self._binds)
+        self._refresh_kb_list()
+
+    def _refresh_kb_list(self):
+        while child := self.kb_list_box.get_first_child():
+            self.kb_list_box.remove(child)
+        if not self._binds:
+            lbl = Gtk.Label(label="No custom keybinds yet. Add one above.", xalign=0)
+            lbl.add_css_class("muted")
+            self.kb_list_box.append(lbl)
+            return
+        for idx, b in enumerate(self._binds):
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            combo = "+".join(b.get("mods", []) + [b["key"]])
+            txt = Gtk.Label(label=f"{combo}  →  {b['label']} ({b['command']})", xalign=0, wrap=True)
+            txt.set_hexpand(True)
+            row.append(txt)
+            rm = Gtk.Button(label="Remove")
+            rm.add_css_class("danger")
+            rm.connect("clicked", lambda _, i=idx: self._remove_keybind(i))
+            row.append(rm)
+            self.kb_list_box.append(row)
+
+    def _remove_keybind(self, idx: int):
+        if 0 <= idx < len(self._binds):
+            self._binds.pop(idx)
+            self._save_and_apply_keybinds(self._binds)
+            self._refresh_kb_list()
+
+    # ------------------------------------------------------------ Display & Monitors
+    def _build_display_page(self):
+        scroll, box = scrolled_page()
+        card = make_card("Connected Displays")
+        self.disp_info = Gtk.Label(xalign=0, wrap=True)
+        card.append(self.disp_info)
+
+        ctrl_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        ctrl_row.append(Gtk.Label(label="Scale:", xalign=0))
+        self.scale_combo = Gtk.DropDown.new_from_strings(["1.0", "1.25", "1.5", "2.0"])
+        ctrl_row.append(self.scale_combo)
+        apply_scale = Gtk.Button(label="Apply Scale")
+        apply_scale.add_css_class("primary")
+        apply_scale.connect("clicked", self._apply_display_scale)
+        ctrl_row.append(apply_scale)
+
+        ref_btn = Gtk.Button(label="Refresh")
+        ref_btn.add_css_class("secondary")
+        ref_btn.connect("clicked", lambda *_: self._refresh_displays())
+        ctrl_row.append(ref_btn)
+        card.append(ctrl_row)
+        box.append(card)
+
+        self._refresh_displays()
+        return scroll
+
+    def _refresh_displays(self):
+        b = compositor_backend()
+        self._outputs = []
+        lines = []
+        if b == "sway":
+            rc, out, _ = run_cmd(["swaymsg", "-t", "get_outputs", "-r"])
+            if rc == 0:
+                for o in json.loads(out):
+                    r = o.get("rect", {})
+                    self._outputs.append(o["name"])
+                    lines.append(f"• {o['name']}: {r.get('width')}x{r.get('height')} (scale {o.get('scale', 1.0)})")
+        elif b == "hyprland":
+            rc, out, _ = run_cmd(["hyprctl", "monitors", "-j"])
+            if rc == 0:
+                for m in json.loads(out):
+                    self._outputs.append(m["name"])
+                    lines.append(f"• {m['name']}: {m.get('width')}x{m.get('height')}@{m.get('refreshRate')}Hz (scale {m.get('scale', 1.0)})")
+        self.disp_info.set_text("\n".join(lines) if lines else "No compositor output information available.")
+
+    def _apply_display_scale(self, *_):
+        scales = ["1.0", "1.25", "1.5", "2.0"]
+        sc = scales[self.scale_combo.get_selected()]
+        b = compositor_backend()
+        for name in getattr(self, "_outputs", []):
+            if b == "sway":
+                run_cmd(["swaymsg", "output", name, "scale", sc])
+            elif b == "hyprland":
+                run_cmd(["hyprctl", "keyword", "monitor", f"{name},preferred,auto,{sc}"])
+        self._refresh_displays()
+        self._set_status(f"Applied display scale {sc}", True)
+
+    # ------------------------------------------------------------ Audio & Devices
+    def _build_audio_page(self):
+        scroll, box = scrolled_page()
+        card = make_card("Volume & Audio Outputs")
+
+        vol_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        vol_row.append(Gtk.Label(label="Output Volume (%):", xalign=0))
+        self.vol_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 2)
+        self.vol_scale.set_hexpand(True)
+        self.vol_scale.set_value(self._get_volume_pct())
+        self.vol_scale.connect("value-changed", self._on_vol_changed)
+        vol_row.append(self.vol_scale)
+        card.append(vol_row)
+
+        btn_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        mute_btn = Gtk.Button(label="Toggle Output Mute")
+        mute_btn.add_css_class("secondary")
+        mute_btn.connect("clicked", lambda *_: self._run_ctl(["hacknetctl", "volume", "mute"], "Toggled output mute"))
+        btn_row.append(mute_btn)
+
+        mic_btn = Gtk.Button(label="Toggle Mic Mute")
+        mic_btn.add_css_class("secondary")
+        mic_btn.connect("clicked", lambda *_: self._run_ctl(["wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "toggle"], "Toggled mic mute"))
+        btn_row.append(mic_btn)
+        card.append(btn_row)
+
+        sink_lbl = Gtk.Label(label="Available Audio Sinks (pactl):", xalign=0)
+        sink_lbl.add_css_class("muted")
+        card.append(sink_lbl)
+
+        self.sink_combo = Gtk.DropDown.new_from_strings(["Scanning..."])
+        self.sink_names = []
+        sink_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.sink_combo.set_hexpand(True)
+        sink_row.append(self.sink_combo)
+        set_sink = Gtk.Button(label="Set Default")
+        set_sink.add_css_class("primary")
+        set_sink.connect("clicked", self._apply_default_sink)
+        sink_row.append(set_sink)
+        card.append(sink_row)
+
+        box.append(card)
+        self._refresh_sinks()
+        return scroll
+
+    def _get_volume_pct(self):
+        rc, out, _ = run_cmd(["wpctl", "get-volume", "@DEFAULT_AUDIO_SINK@"])
+        if rc == 0 and "Volume:" in out:
+            try:
+                return round(float(out.split()[1]) * 100)
+            except Exception:
+                pass
+        return 50
+
+    def _on_vol_changed(self, scale):
+        pct = int(scale.get_value())
+        run_cmd(["hacknetctl", "volume", str(pct)])
+
+    def _refresh_sinks(self):
+        rc, out, _ = run_cmd(["pactl", "list", "short", "sinks"])
+        sinks = []
+        if rc == 0:
+            for line in out.splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 2:
+                    sinks.append(parts[1])
+        self.sink_names = sinks
+        self.sink_combo.set_model(Gtk.StringList.new(sinks or ["No audio sinks detected"]))
+
+    def _apply_default_sink(self, *_):
+        if not self.sink_names:
+            return
+        sink = self.sink_names[self.sink_combo.get_selected()]
+        rc, _, err = run_cmd(["pactl", "set-default-sink", sink])
+        self._set_status(f"Default sink: {sink}" if rc == 0 else err, rc == 0)
+
+    # ------------------------------------------------------------ Network & Bluetooth
+    def _build_network_page(self):
+        scroll, box = scrolled_page()
+
+        net_card = make_card("Network Interfaces & Radios")
+        self.net_info = Gtk.Label(xalign=0, wrap=True)
+        net_card.append(self.net_info)
+
+        radio_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        for label, cmd in [
+            ("Wi-Fi On", ["nmcli", "radio", "wifi", "on"]),
+            ("Wi-Fi Off", ["nmcli", "radio", "wifi", "off"]),
+            ("Bluetooth On", ["bluetoothctl", "power", "on"]),
+            ("Bluetooth Off", ["bluetoothctl", "power", "off"]),
+        ]:
+            b = Gtk.Button(label=label)
+            b.add_css_class("secondary")
+            b.connect("clicked", lambda _, c=cmd, l=label: self._net_action(c, l))
+            radio_row.append(b)
+        ref = Gtk.Button(label="Refresh")
+        ref.add_css_class("secondary")
+        ref.connect("clicked", lambda *_: self._refresh_network())
+        radio_row.append(ref)
+        net_card.append(radio_row)
+        box.append(net_card)
+
+        host_card = make_card("System Hostname")
+        hrow = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.host_entry = Gtk.Entry(text=platform.node())
+        self.host_entry.set_hexpand(True)
+        hrow.append(self.host_entry)
+        hbtn = Gtk.Button(label="Set Hostname")
+        hbtn.add_css_class("primary")
+        hbtn.connect("clicked", self._set_hostname)
+        hrow.append(hbtn)
+        host_card.append(hrow)
+        box.append(host_card)
+
+        self._refresh_network()
+        return scroll
+
+    def _net_action(self, cmd, label):
+        rc, _, err = run_cmd(cmd)
+        self._refresh_network()
+        self._set_status(label if rc == 0 else err, rc == 0)
+
+    def _refresh_network(self):
+        rc, out, _ = run_cmd(["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "dev"])
+        if rc == 0 and out:
+            self.net_info.set_text(out)
+        else:
+            _, ip_out, _ = run_cmd(["ip", "-br", "addr"])
+            self.net_info.set_text(ip_out or "No network interfaces detected.")
+
+    def _set_hostname(self, *_):
+        hn = self.host_entry.get_text().strip()
+        if not hn:
+            return
+        rc, _, err = run_cmd(["pkexec", "hostnamectl", "set-hostname", hn])
+        self._set_status(f"Hostname set to {hn}" if rc == 0 else err, rc == 0)
+
+    # ------------------------------------------------------------ Keyboard & Mouse
+    def _build_input_page(self):
+        scroll, box = scrolled_page()
+        cfg = {"layout": "us", "repeat_rate": 25, "repeat_delay": 300, "natural_scroll": False}
+        if os.path.isfile(INPUT_JSON):
+            try:
+                cfg.update(json.load(open(INPUT_JSON)))
+            except Exception:
+                pass
+
+        card = make_card("Keyboard & Pointer Settings")
+        grid = Gtk.Grid(column_spacing=12, row_spacing=10)
+
+        grid.attach(Gtk.Label(label="Keyboard Layout:", xalign=0), 0, 0, 1, 1)
+        self.kb_layout_combo = Gtk.DropDown.new_from_strings(KEYMAP_LAYOUTS)
+        if cfg["layout"] in KEYMAP_LAYOUTS:
+            self.kb_layout_combo.set_selected(KEYMAP_LAYOUTS.index(cfg["layout"]))
+        grid.attach(self.kb_layout_combo, 1, 0, 1, 1)
+
+        grid.attach(Gtk.Label(label="Repeat Rate (keys/sec):", xalign=0), 0, 1, 1, 1)
+        self.rep_rate = Gtk.SpinButton.new_with_range(10, 100, 5)
+        self.rep_rate.set_value(cfg["repeat_rate"])
+        grid.attach(self.rep_rate, 1, 1, 1, 1)
+
+        grid.attach(Gtk.Label(label="Repeat Delay (ms):", xalign=0), 0, 2, 1, 1)
+        self.rep_delay = Gtk.SpinButton.new_with_range(100, 1000, 50)
+        self.rep_delay.set_value(cfg["repeat_delay"])
+        grid.attach(self.rep_delay, 1, 2, 1, 1)
+
+        self.nat_scroll = Gtk.CheckButton(label="Natural Scrolling (Touchpad / Mouse)", active=cfg["natural_scroll"])
+        grid.attach(self.nat_scroll, 0, 3, 2, 1)
+        card.append(grid)
+
+        apply_btn = Gtk.Button(label="Apply & Save Input Settings")
+        apply_btn.add_css_class("primary")
+        apply_btn.connect("clicked", self._apply_input_settings)
+        card.append(apply_btn)
+        box.append(card)
+        return scroll
+
+    def _apply_input_settings(self, *_):
+        layout = KEYMAP_LAYOUTS[self.kb_layout_combo.get_selected()]
+        rate = int(self.rep_rate.get_value())
+        delay = int(self.rep_delay.get_value())
+        nat = self.nat_scroll.get_active()
+
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(INPUT_JSON, "w") as f:
+            json.dump({"layout": layout, "repeat_rate": rate, "repeat_delay": delay, "natural_scroll": nat}, f, indent=2)
+
+        os.makedirs(os.path.dirname(SWAY_INPUT), exist_ok=True)
+        with open(SWAY_INPUT, "w") as f:
+            f.write(
+                "# Managed by hacknet-settings\n"
+                "input * {\n"
+                f"    xkb_layout {layout}\n"
+                f"    repeat_rate {rate}\n"
+                f"    repeat_delay {delay}\n"
+                f"    natural_scroll {'enabled' if nat else 'disabled'}\n"
+                "}\n"
+            )
+
+        os.makedirs(os.path.dirname(HYPR_INPUT), exist_ok=True)
+        with open(HYPR_INPUT, "w") as f:
+            f.write(
+                "-- Managed by hacknet-settings\n"
+                "local hl = require('hyprland')\n"
+                "hl.input = hl.input or {}\n"
+                f"hl.input.kb_layout = \"{layout}\"\n"
+                f"hl.input.repeat_rate = {rate}\n"
+                f"hl.input.repeat_delay = {delay}\n"
+            )
+
+        reload_compositor()
+        self._set_status(f"Applied input settings (layout={layout})", True)
+
+    # ------------------------------------------------------------ Notifications
+    def _build_notifications_page(self):
+        scroll, box = scrolled_page()
+        card = make_card("Notification Controls")
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        for label, cmd in [
+            ("Enable Do Not Disturb", ["hacknetctl", "dnd", "on"]),
+            ("Disable Do Not Disturb", ["hacknetctl", "dnd", "off"]),
+            ("Send Test Notification", ["hacknetctl", "notify", "HacknetOS Settings", "Test notification delivered"]),
+        ]:
+            b = Gtk.Button(label=label)
+            b.add_css_class("secondary")
+            b.connect("clicked", lambda _, c=cmd, l=label: self._run_ctl(c, l))
+            row.append(b)
+        card.append(row)
+        box.append(card)
+        return scroll
+
+    # ------------------------------------------------------------ Date, Time & System
+    def _build_system_page(self):
+        scroll, box = scrolled_page()
+
+        dt_card = make_card("Date, Time & Timezone")
+        self.tz_lbl = Gtk.Label(xalign=0, wrap=True)
+        dt_card.append(self.tz_lbl)
+
+        tz_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        tz_row.append(Gtk.Label(label="Timezone:", xalign=0))
+        self.tz_entry = Gtk.Entry(placeholder_text="America/New_York or UTC")
+        self.tz_entry.set_hexpand(True)
+        tz_row.append(self.tz_entry)
+        tz_btn = Gtk.Button(label="Set Timezone")
+        tz_btn.add_css_class("primary")
+        tz_btn.connect("clicked", self._set_timezone)
+        tz_row.append(tz_btn)
+        dt_card.append(tz_row)
+        box.append(dt_card)
+
+        sys_card = make_card("System & User Info")
+        _, mem_out, _ = run_cmd(["free", "-h"])
+        _, df_out, _ = run_cmd(["df", "-h", "/"])
+        sys_lbl = Gtk.Label(
+            label=(
+                f"User     : {os.environ.get('USER', 'unknown')}\n"
+                f"Hostname : {platform.node()}\n"
+                f"Kernel   : {platform.release()}\n"
+                f"Arch     : {platform.machine()}\n\n"
+                f"Memory:\n{mem_out}\n\n"
+                f"Root Filesystem:\n{df_out}"
+            ),
+            xalign=0, wrap=True,
+        )
+        sys_card.append(sys_lbl)
+
+        pw_btn = Gtk.Button(label="Change Account Password (Terminal)")
+        pw_btn.add_css_class("secondary")
+        pw_btn.connect("clicked", lambda *_: run_detached(["foot", "bash", "-lc", "passwd; read -rp 'Press Enter to close...'"]))
+        sys_card.append(pw_btn)
+        box.append(sys_card)
+
+        self._refresh_datetime()
+        return scroll
+
+    def _refresh_datetime(self):
+        rc, out, _ = run_cmd(["timedatectl", "status"])
+        self.tz_lbl.set_text(out if rc == 0 else "timedatectl unavailable.")
+
+    def _set_timezone(self, *_):
+        tz = self.tz_entry.get_text().strip()
+        if not tz:
+            return
+        rc, _, err = run_cmd(["pkexec", "timedatectl", "set-timezone", tz])
+        self._refresh_datetime()
+        self._set_status(f"Timezone set to {tz}" if rc == 0 else err, rc == 0)
+
+
+def main():
+    app = Gtk.Application(application_id="org.hacknetos.settings")
+    app.connect("activate", lambda a: SettingsWindow(a).present())
+    return app.run(None)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
