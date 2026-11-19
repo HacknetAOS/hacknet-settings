@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""Entrypoint for HacknetOS Settings."""
+
+import os
+import sys
+
+# Ensure software-rendered Wayland compositors (e.g. Sway pixman in VMs) render GTK4 cleanly.
+if os.environ.get("WLR_RENDERER") == "pixman" and "GSK_RENDERER" not in os.environ:
+    os.environ["GSK_RENDERER"] = "cairo"
+
+from hacknet_settings.app import main  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(main())

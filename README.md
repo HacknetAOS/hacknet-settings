@@ -1,13 +1,15 @@
 # HacknetOS Settings (`hacknet-settings`)
 
-Native GTK4 system and desktop environment settings application for HacknetOS.
+Modular GTK4 system, desktop, theme, input, and keybind settings application for HacknetOS.
 
-## Features
-- **Appearance & Theme:** Switch HacknetOS color presets (`blue`, `ente`, `hellhound`, `naix`, `hacknet`) and view system theme config.
-- **Desktop & Layout:** Toggle RAM gutter, console layout mode, fullscreen, and manage virtual desktops.
-- **Keybinds:** Add, edit, remove, and live-reload custom shortcuts for desktop environment actions and commands across Sway and Hyprland.
-- **Display & Monitors:** Inspect outputs, switch resolution/scale, and adjust brightness when supported.
-- **Audio & Media:** Output volume, mute, mic mute, and default audio sink selection.
-- **Network & Bluetooth:** Interface status, Wi-Fi/Bluetooth toggles, and hostname configuration.
-- **Input (Keyboard & Mouse):** Layout, repeat rate/delay, natural scroll, and pointer sensitivity.
-- **Notifications, Date/Time & System:** DND, timezone/NTP, hardware/OS info, and user password management.
+## Structure
+
+- `bin/hacknet-settings` — CLI/desktop entrypoint
+- `data/` — `style.css` and `hacknet-settings.desktop`
+- `hacknet_settings/system_ctl.py` — Shared OS, compositor, theme, display, audio, network, and datetime helpers
+- `hacknet_settings/compositor_cfg.py` — Keybinds and input persistence + Sway/Hyprland config writers
+- `hacknet_settings/widgets.py` — Shared GTK4 UI builders
+- `hacknet_settings/pages_desktop.py` — Appearance, Desktop & Layout, Keybinds, and Notifications pages
+- `hacknet_settings/pages_system.py` — Display, Audio, Network & Bluetooth, Keyboard & Mouse, and Date/Time/System pages
+- `hacknet_settings/app.py` — Main GTK4 application window and lazy page router
+- `tests/` — Unit tests for compositor config generation and persistence

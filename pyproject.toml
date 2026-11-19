@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hacknet-settings"
+version = "0.2.0"
+description = "Modular GTK4 system, desktop, theme, input, and keybind settings application for HacknetOS"
+readme = "README.md"
+license = {text = "GPL-3.0-or-later"}
+requires-python = ">=3.11"
+
+[project.scripts]
+hacknet-settings = "hacknet_settings.app:main"
+
+[tool.setuptools.packages.find]
+include = ["hacknet_settings*"]

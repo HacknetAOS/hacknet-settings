@@ -1,0 +1,98 @@
+window {
+    background-color: #0b0e14;
+    color: #c0c8d0;
+    font-family: "JetBrainsMono Nerd Font", "Noto Sans", sans-serif;
+}
+
+.sidebar {
+    background-color: #0d111a;
+    border-right: 1px solid #232b3e;
+}
+
+.sidebar list row {
+    padding: 10px 14px;
+    border-radius: 0px;
+}
+
+.sidebar list row:selected {
+    background-color: #1c2436;
+    color: #7aa2f7;
+    border-left: 3px solid #7aa2f7;
+}
+
+.header-bar {
+    background-color: #101520;
+    border-bottom: 1px solid #232b3e;
+    padding: 12px 20px;
+}
+
+.title-label {
+    font-size: 18px;
+    font-weight: bold;
+    color: #b9a6ff;
+}
+
+.section-title {
+    font-size: 14px;
+    font-weight: bold;
+    color: #7aa2f7;
+}
+
+.card {
+    background-color: #121722;
+    border: 1px solid #232b3e;
+    border-radius: 6px;
+    padding: 14px;
+}
+
+.muted {
+    color: #79808f;
+    font-size: 12px;
+}
+
+.status-ok {
+    color: #9ece6a;
+    font-size: 12px;
+}
+
+.status-warn {
+    color: #e0af68;
+    font-size: 12px;
+}
+
+button.primary {
+    background-color: #5a4fcf;
+    color: #ffffff;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 14px;
+    font-weight: bold;
+}
+
+button.primary:hover {
+    background-color: #6c61e0;
+}
+
+button.secondary {
+    background-color: #1a2130;
+    color: #c0c8d0;
+    border: 1px solid #2b354d;
+    border-radius: 4px;
+    padding: 6px 12px;
+}
+
+button.secondary:hover {
+    background-color: #253047;
+}
+
+button.danger {
+    background-color: #3a1922;
+    color: #f7768e;
+    border: 1px solid #6b2938;
+    border-radius: 4px;
+    padding: 6px 12px;
+}
+
+button.danger:hover {
+    background-color: #4f222e;
+}
